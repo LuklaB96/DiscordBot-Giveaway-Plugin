@@ -7,85 +7,85 @@ namespace Giveaway.Managers
 {
     public class EmbedManager
     {
-        private string title;
-        private string prize;
-        private TimestampTag endsAt;
-        private string authorId;
-        private string footerId;
-        private int maxWinners;
-        private int entries;
-        private bool open;
+        private string _title;
+        private string _prize;
+        private TimestampTag _endsAt;
+        private string _authorId;
+        private string _footerId;
+        private int _maxWinners;
+        private int _entries;
+        private bool _open;
 
         public EmbedManager(bool open = true)
         {
-            title = string.Empty;
-            prize = string.Empty;
-            endsAt = TimestampTag.FromDateTime(DateTime.Now);
-            authorId = string.Empty;
-            footerId = string.Empty;
-            maxWinners = 0;
-            entries = 0;
-            this.open = open;
+            _title = string.Empty;
+            _prize = string.Empty;
+            _endsAt = TimestampTag.FromDateTime(DateTime.Now);
+            _authorId = string.Empty;
+            _footerId = string.Empty;
+            _maxWinners = 0;
+            _entries = 0;
+            _open = open;
         }
         public Embed Build()
         {
-            if (open)
+            if (_open)
             {
                 var embed = new EmbedBuilder();
-                embed.WithTitle($"{title}");
-                embed.WithDescription($"Prize: {prize}");
-                embed.AddField("\u200b", $"Entries: {entries}");
-                embed.AddField("\u200b", $"Ends at: {endsAt} \r\n Max winners: {maxWinners} \r\n Host: <@{authorId}>", inline: true);
-                embed.WithFooter($"ID: {footerId}");
+                embed.WithTitle($"{_title}");
+                embed.WithDescription($"Prize: {_prize}");
+                embed.AddField("\u200b", $"Entries: {_entries}");
+                embed.AddField("\u200b", $"Ends at: {_endsAt} \r\n Max winners: {_maxWinners} \r\n Host: <@{_authorId}>", inline: true);
+                embed.WithFooter($"ID: {_footerId}");
                 embed.WithCurrentTimestamp();
                 return embed.Build();
             }
             else
             {
                 var embed = new EmbedBuilder();
-                embed.WithTitle($"{title}");
-                embed.WithDescription($"Prize: {prize}");
-                embed.AddField("\u200b", $"Entries: {entries}");
-                embed.AddField("\u200b", $"Ends at: {endsAt} \r\n Max winners: {maxWinners} \r\n Host: <@{authorId}>", inline: true);
+                embed.WithTitle($"{_title}");
+                embed.WithDescription($"Prize: {_prize}");
+                embed.AddField("\u200b", $"Entries: {_entries}");
+                embed.AddField("\u200b", $"Ends at: {_endsAt} \r\n Max winners: {_maxWinners} \r\n Host: <@{_authorId}>", inline: true);
                 embed.AddField("\u200b", $":lock: Giveaway closed! :lock:");
-                embed.WithFooter($"ID: {footerId}");
+                embed.WithFooter($"ID: {_footerId}");
                 embed.WithCurrentTimestamp();
                 return embed.Build();
             }
         }
         public EmbedManager WithTitle(string title)
         {
-            this.title = title;
+            this._title = title;
             return this;
         }
         public EmbedManager Prize(string prize)
         {
-            this.prize = prize;
+            _prize = prize;
             return this;
         }
         public EmbedManager Enteries(int entries)
         {
-            this.entries = entries;
+            _entries = entries;
             return this;
         }
         public EmbedManager EndsAt(TimestampTag endsAt)
         {
-            this.endsAt = endsAt;
+            _endsAt = endsAt;
             return this;
         }
         public EmbedManager AuthorId(string authorId)
         {
-            this.authorId = authorId;
+            _authorId = authorId;
             return this;
         }
         public EmbedManager GiveawayId(string id)
         {
-            footerId = id;
+            _footerId = id;
             return this;
         }
         public EmbedManager MaxWinners(int maxWinners)
         {
-            this.maxWinners = maxWinners;
+            _maxWinners = maxWinners;
             return this;
         }
 
