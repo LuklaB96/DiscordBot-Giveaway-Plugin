@@ -12,6 +12,8 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using DiscordPluginAPI.Helpers;
 using Giveaway.Managers;
+using Giveaway.Helpers;
+using Giveaway.Entities;
 
 namespace Giveaway
 {
@@ -35,6 +37,7 @@ namespace Giveaway
     public class Giveaway : IPlugin, IPluginCommands, IPluginComponents
     {
         public ILogger Logger { get; set; }
+        IDatabase Database { get; set; }
         public EmbedOptions[] defaultOptions = { EmbedOptions.increase };
         private static List<string> activeGiveaways;
         public CommandType commandType => CommandType.Slash;
@@ -75,22 +78,16 @@ namespace Giveaway
                     .WithType(ApplicationCommandOptionType.SubCommand)
                 ) 
         };
-
         public Dictionary<string, string> DatabaseTableProperties => new Dictionary<string, string>()
         {
             ["list"] = "id TEXT PRIMARY KEY, guild_id TEXT, channel_id TEXT, message_id TEXT, message_owner TEXT, title TEXT, description TEXT, max_winners INTEGER, winner TEXT, entries INTEGER DEFAULT 0 NOT NULL, ends TEXT DEFAULT 1 NOT NULL, ended INTEGER DEFAULT 0 NOT NULL, closed INTEGER DEFAULT 0 NOT NULL, created_at TEXT",
             ["users"] = "id INTEGER PRIMARY KEY, giveaway_id TEXT, user_id TEXT"
         };
-
         public Config Config { get; set; }
-
         public List<string> PrefixCommands { get; set; }
-
         public string Name { get; set; }
         public List<SocketGuild> guilds { get; set; }
         public DiscordSocketClient Client { get; set; }
-
-        IDatabase Database;
 
         public async Task<Task> Initalize(IDatabase database = null, ILogger logger = null)
         {
@@ -103,9 +100,9 @@ namespace Giveaway
         public async Task<object> ExecuteSlashCommand(SocketSlashCommand command = null)
         {
             Dictionary<string, string> args = command.Data.Options.First().Options.ToDictionary(x => x.Name, x => x.Value.ToString());
-            var sub = command.Data.Options.First().Name;
+            string subCommandName = command.Data.Options.First().Name;
             RestInteractionMessage msg = null;
-            switch (sub)
+            switch (subCommandName)
             {
 
                 case "create":
@@ -134,53 +131,101 @@ namespace Giveaway
         }
         public Embed CreateGiveawayEmbed(Dictionary<string, string> args)
         {
-            double days = 1;
-
             string maxWinners = args.ContainsKey("winners") == true ? args["winners"] : "1";
             maxWinners = Int32.Parse(maxWinners) <= 0 ? "1" : maxWinners;
 
             string ends = args.ContainsKey("ends") == true ? args["ends"] : "1";
+            double.TryParse(ends, out double days);
+            TimestampTag endsAt = TimestampTag.FromDateTime(DateTime.Now.AddDays(days));
 
-            double.TryParse(ends, out days);
-
-            var time = TimestampTag.FromDateTime(DateTime.Now.AddDays(days));
-
-            if (args.Count == 0 || args.Count < 3) return null;
+            if (args.Count == 0 || args.Count < 3)
+            {
+                return null;
+            }
 
             EmbedManager giveawayEmbedNew = new EmbedManager()
                 .WithTitle(args["title"])
                 .Prize(args["prize"])
-                .Enteries(0).EndsAt(time)
+                .Enteries(0).EndsAt(endsAt)
                 .MaxWinners(Int32.Parse(maxWinners))
                 .AuthorId(args["user_id"])
                 .GiveawayId(args["guid"]);
 
             return giveawayEmbedNew.Build();
         }
+        public async Task<Task> UpdateGiveawayEmbed(ulong messageId, ITextChannel channel, bool isGiveawayOpen)
+        {
+            const string selectQuery = "SELECT message_id, id, title, description, message_owner, max_winners, entries, ends FROM #list WHERE message_id = @Id";
+
+            QueryParametersBuilder parameters = new QueryParametersBuilder();
+            parameters.Add("@Id", messageId.ToString());
+
+            List<string> data = await Database.SelectQueryAsync(selectQuery, parameters, Config);
+
+            if (data.Count > 0)
+            {
+                Logger.Log(Name, "giveaway update", LogLevel.Info);
+                string giveawayId = data[1];
+                string title = data[2];
+                string description = data[3];
+                string authorId = data[4];
+                string maxWinners = data[5];
+                string entries = data[6];
+                TimestampTag endsAt = TimestampTag.FromDateTime(DateTime.Parse(data[7]));
+                EmbedManager giveawayEmbed = null;
+                if (isGiveawayOpen)
+                {
+                    giveawayEmbed = new EmbedManager(open: true)
+                        .WithTitle(title)
+                        .Prize(description)
+                        .Enteries(Int32.Parse(entries))
+                        .EndsAt(endsAt)
+                        .MaxWinners(Int32.Parse(maxWinners))
+                        .AuthorId(authorId)
+                        .GiveawayId(giveawayId);
+                }
+                else
+                {
+                    giveawayEmbed = new EmbedManager(open: false)
+                        .WithTitle(title)
+                        .Prize(description)
+                        .Enteries(Int32.Parse(entries))
+                        .EndsAt(endsAt)
+                        .MaxWinners(Int32.Parse(maxWinners))
+                        .AuthorId(authorId)
+                        .GiveawayId(giveawayId);
+                }
+
+                IMessage msg = await channel.GetMessageAsync(ulong.Parse(data[0]));
+                await channel.ModifyMessageAsync(msg.Id, x => { x.Embed = giveawayEmbed.Build(); });
+            }
+            return Task.CompletedTask;
+        }
 
         public async Task<RestInteractionMessage> Create(SocketSlashCommand command, Dictionary<string, string> args)
         {
             string maxWinners = args.ContainsKey("winners") == true ? args["winners"] : "1";
-            maxWinners = int.Parse(maxWinners) <= 0 ? "1" : maxWinners;
-            string ends = args.ContainsKey("ends") == true ? args["ends"] : "1";
-            args.Add("user_id", command.User.Id.ToString());
-            string guid = Uuid.Create(Name);
-            args.Add("guid", guid);
+            string endsInDays = args.ContainsKey("ends") == true ? args["ends"] : "1";
             string guildId = command.GuildId.ToString();
+            string guid = Uuid.Create(Name);
+            maxWinners = int.Parse(maxWinners) <= 0 ? "1" : maxWinners;
+            args.Add("user_id", command.User.Id.ToString());
+            args.Add("guid", guid);
+            
 
-            var embed = CreateGiveawayEmbed(args);
+            Embed embed = CreateGiveawayEmbed(args);
 
-            var button = new ComponentBuilder().WithButton("Join", guid, ButtonStyle.Primary, new Emoji("🎉"));
+            ComponentBuilder button = new ComponentBuilder().WithButton("Join", "AddGiveawayUser", ButtonStyle.Primary, new Emoji("🎉"));
 
             // Send the embed to the channel
             await command.RespondAsync("", null, false, false, null, button.Build(), embed);
 
-            var msg = await command.GetOriginalResponseAsync();
-            var messageId = msg.Id.ToString();
-            var channelId = msg.Channel.Id.ToString();
-            var author = command.User.Id.ToString();
+            RestInteractionMessage msg = await command.GetOriginalResponseAsync();
+            string messageId = msg.Id.ToString();
+            string channelId = msg.Channel.Id.ToString();
+            string author = command.User.Id.ToString();
             DateTime date = DateTime.Now;
-            date = date.AddDays(double.Parse(ends));
+            date = date.AddDays(double.Parse(endsInDays));
             string endDate = date.ToString("yyyy-MM-dd HH:mm:ss");
             if (command.HasResponded)
             {
@@ -209,41 +254,19 @@ namespace Giveaway
         {
             const string updateQuery = "UPDATE #list SET closed = @Closed WHERE id = @Id";
             const string selectQuery = "SELECT message_id, id, title, description, message_owner, max_winners, entries, ends FROM #list WHERE id = @Id";
-            const string closed = "1";
 
             string id = args["id"];
 
             QueryParametersBuilder parameters = new QueryParametersBuilder();
             parameters.Add("@Id", id);
-            parameters.Add("@Closed",closed);
+            parameters.Add("@Closed","1");
 
             int result = await Database.UpdateQueryAsync(updateQuery, parameters, Config);
-            var data = await Database.SelectQueryAsync(selectQuery, parameters, Config);
+            List<string> data = await Database.SelectQueryAsync(selectQuery, parameters, Config);
 
             if (result > 0)
             {
-                string giveawayId = data[1];
-                string title = data[2];
-                string description = data[3];
-                string authorId = data[4];
-                string maxWinners = data[5];
-                string entries = data[6];
-                var endsAt = DateTime.Parse(data[7]);
-
-                EmbedManager giveawayEmbedClose = new EmbedManager(open: false)
-                    .WithTitle(title)
-                    .Prize(description)
-                    .Enteries(Int32.Parse(entries))
-                    .EndsAt(TimestampTag.FromDateTime(endsAt))
-                    .MaxWinners(Int32.Parse(maxWinners))
-                    .AuthorId(authorId)
-                    .GiveawayId(giveawayId);
-
-                await command.RespondAsync("Giveaway closed!", ephemeral: true);
-                var channel = command.Channel as ITextChannel;
-                var msg = await channel.GetMessageAsync(ulong.Parse(data[0]));
-
-                await channel.ModifyMessageAsync(msg.Id, x => { x.Embed = giveawayEmbedClose.Build(); });
+                await UpdateGiveawayEmbed(ulong.Parse(data[0]), command.Channel as ITextChannel, false);
                 return;
             }
 
@@ -259,7 +282,7 @@ namespace Giveaway
             QueryParametersBuilder parameters = new QueryParametersBuilder();
             parameters.Add("@Id", id);
 
-            var items = await Database.SelectQueryAsync(selectQuery, parameters, Config);
+            List<string> items = await Database.SelectQueryAsync(selectQuery, parameters, Config);
             if (items.Count > 0)
                 entries = Convert.ToInt32(items[0]);
 
@@ -276,27 +299,17 @@ namespace Giveaway
                     case EmbedOptions.CloseGiveaway:
                         break;
                     case EmbedOptions.OpenGiveaway:
-                        var lastField = embed.Fields.LastOrDefault();
-                        if (lastField.Value.ToString().ToLower().Contains("closed"))
-                        {
-                            var field = embed.Fields.LastOrDefault();
-                            embed.Fields.Remove(field);
-                            return embed;
-                        }
-                        else
-                        {
-                            return null;
-                        }
+                        break;
                 }
             }
-
-
+            const string updateQuery = "UPDATE #list SET entries = @Entries WHERE id = @Id";
+            await Database.UpdateQueryAsync(updateQuery, parameters, Config);
             embed.Fields[0].Value = "Entries: " + entries;
 
             parameters.Add("@Entries", entries.ToString());
 
-            const string updateQuery = "UPDATE #list SET entries = @Entries WHERE id = @Id";
-            await Database.UpdateQueryAsync(updateQuery, parameters, Config);
+            
+            
             return embed;
         }
         public async Task Open(SocketSlashCommand command, Dictionary<string, string> args)
@@ -311,7 +324,7 @@ namespace Giveaway
             parameters.Add("@Id", id);
             parameters.Add("@Closed", closed);
 
-            var data = await Database.SelectQueryAsync(selectQuery, parameters, Config);
+            List<string> data = await Database.SelectQueryAsync(selectQuery, parameters, Config);
             try
             {
                 if (data.Count > 0 && data[0] == "1" && data[1] == "0")
@@ -330,16 +343,14 @@ namespace Giveaway
                     await Database.UpdateQueryAsync(updateQuery, parameters, Config);
                     await command.RespondAsync($"Giveaway is now open! And will be closed again at {newDate.ToString("yyyy-MM-dd HH:mm:ss")}", ephemeral: true);
 
-                    var channel = command.Channel as ITextChannel;
-                    var msg = await channel.GetMessageAsync(ulong.Parse(data[2]));
-                    var embed = msg.Embeds.FirstOrDefault().ToEmbedBuilder();
-                    var newEmbed = await EditGiveawayEmbed(embed, options: new EmbedOptions[] { EmbedOptions.OpenGiveaway });
-
-                    await channel.ModifyMessageAsync(msg.Id, x => { x.Embed = newEmbed.Build(); });
+                    await UpdateGiveawayEmbed(ulong.Parse(data[2]), command.Channel as ITextChannel, true);
 
                     return;
                 }
-            } catch(Exception ex) { Console.WriteLine(ex); }
+            } catch(Exception ex) 
+            {
+                Logger.Log(Name, $"Could not open a giveaway, error: {ex.Message}",LogLevel.Error);
+            }
 
 
             await command.RespondAsync("Wrong giveaway id or already opened/ended!", ephemeral: true);
@@ -348,21 +359,25 @@ namespace Giveaway
         {
             try
             {
-                string id = args["id"];
+                string giveawayId = args["id"];
 
-                const string selectGiveawayDataQuery = "SELECT max_winners,ended,message_id,closed FROM #list WHERE id = @Id";
-                const string selectGiveawayUsersQuery = "SELECT user_id FROM #users WHERE giveaway_id = @Id";
-                const string updateQuery = "UPDATE #list SET closed = @Closed, ended = @Ended, winner = @Winner WHERE id = @Id";
-                const string closedConst = "1";
-                const string endedConst = "1";
+                const string selectGiveawayDataQuery = "SELECT max_winners,ended,message_id,closed FROM #list WHERE id = @GiveawayId";
+                const string selectGiveawayUsersQuery = "SELECT user_id FROM #users WHERE giveaway_id = @GiveawayId";
+                const string updateQuery = "UPDATE #list SET closed = @Closed, ended = @Ended, winner = @Winner WHERE id = @GiveawayId";
 
                 QueryParametersBuilder parameters = new QueryParametersBuilder();
-                parameters.Add("@Id", id);
-                parameters.Add("@Closed", closedConst);
-                parameters.Add("@Ended", endedConst);
+                parameters.Add("@GiveawayId", giveawayId);
+                parameters.Add("@Closed", "1");
+                parameters.Add("@Ended", "1");
 
-                var data = await Database.SelectQueryAsync(selectGiveawayDataQuery, parameters, Config);
-                if (data.Count == 0) { await command.RespondAsync("Wrong id!", ephemeral: true); return; }
+                List<string> data = await Database.SelectQueryAsync(selectGiveawayDataQuery, parameters, Config);
+
+                if (data.Count == 0) 
+                { 
+                    await command.RespondAsync("Wrong id!", ephemeral: true); 
+                    return; 
+                }
+
                 string ended = data[1];
 
                 if (ended != "0")
@@ -372,52 +387,29 @@ namespace Giveaway
                 }
 
                 int maxWinners = int.Parse(data[0]);
-
-                var giveawayUsers = await Database.SelectQueryAsync(selectGiveawayUsersQuery, parameters, Config);
-
-                List<string> winners = new List<string>();
-
-                Random rng = new Random();
-
-                for (int i = 0; i < maxWinners; i++)
-                {
-                    int pick = rng.Next(0, giveawayUsers.Count);
-                    while (true)
-                    {
-                        if (winners.Count == giveawayUsers.Count) break;
-
-                        if (winners.Contains(giveawayUsers[pick]))
-                        {
-                            pick = rng.Next(0, giveawayUsers.Count);
-                        }
-                        else
-                            break;
-                    }
-                    if (winners.Count < giveawayUsers.Count)
-                        winners.Add(giveawayUsers[pick]);
-                }
-
+                List<string> userList = await Database.SelectQueryAsync(selectGiveawayUsersQuery, parameters, Config);
+                GiveawayUsers giveawayUsers = new GiveawayUsers(userList);
+                IReadOnlyCollection<User> winners = giveawayUsers.PickWinners(maxWinners);
                 string jsonWinners = JsonSerializer.Serialize(winners);
 
-                parameters.Add("@winner", jsonWinners);
+                parameters.Add("@Winner", jsonWinners);
 
                 int result = await Database.UpdateQueryAsync(updateQuery, parameters, Config);
                 string str = "The winners are: ";
                 foreach (var w in winners)
                 {
-                    str += "<@" + w + ">, ";
+                    str += "<@" + w.Id.ToString() + ">, ";
                 }
                 await command.RespondAsync(str);
 
-                var channel = command.Channel as ITextChannel;
-                var msg = await channel.GetMessageAsync(ulong.Parse(data[2]));
-                var embed = msg.Embeds.FirstOrDefault().ToEmbedBuilder();
-                var newEmbed = await EditGiveawayEmbed(embed, options: new EmbedOptions[] { EmbedOptions.CloseGiveaway });
+                //data[3] == "0" checks if giveaway is closed in database, if not it was updated earlier and now we need to update giveaway embed with information about it being closed
                 if (data[3] == "0")
-                    await channel.ModifyMessageAsync(msg.Id, x => { x.Embed = newEmbed.Build(); });
+                {
+                    await UpdateGiveawayEmbed(ulong.Parse(data[2]), command.Channel as ITextChannel, false);
+                }
             }catch(Exception ex)
             {
-                Console.WriteLine(ex.ToString());
+                Logger.Log(Name, $"Could not roll winners for giveaway {args["id"]}, error: {ex.Message}", LogLevel.Error);
             }
         }
         public async Task List(SocketSlashCommand command, Dictionary<string, string> args)
@@ -425,47 +417,61 @@ namespace Giveaway
             //const string selectQuery = "SELECT ";
             throw new NotImplementedException();
         }
-        public async Task<GiveawayStatus> GiveawayClosed(string giveawayId)
+        public async Task<GiveawayStatus> GiveawayClosed(string messageId)
         {
-            const string selectQuery = "Select closed,ended FROM #list WHERE id = @GiveawayId";
+            const string selectQuery = "SELECT ended,closed FROM #list WHERE message_id = @GiveawayId";
 
             QueryParametersBuilder parameters = new QueryParametersBuilder();
-            parameters.Add("@GiveawayId", giveawayId);
+            parameters.Add("@GiveawayId", messageId);
 
-            var data = await Database.SelectQueryAsync(selectQuery, parameters, Config);
+            List<string> data = await Database.SelectQueryAsync(selectQuery, parameters, Config);
 
-            if (data[0] == "0" && data[1] == "0") return GiveawayStatus.Open;
+            if (data[0] == "0" && data[1] == "0")
+            {
+                return GiveawayStatus.Open;
+            }
             return GiveawayStatus.Closed;
         }
-        public async Task<GiveawayStatus> AddUserAsync(string giveawayId, string userId)
+        public async Task<GiveawayStatus> AddUserAsync(string messageId, string userId)
         {
-            var status = await GiveawayClosed(giveawayId);
+            GiveawayStatus status = await GiveawayClosed(messageId);
             if (status == GiveawayStatus.Closed) return GiveawayStatus.Closed;
 
             const string selectQuery = "SELECT * FROM #users WHERE user_id = @UserId AND giveaway_id = @GiveawayId";
             const string insertQuery = "INSERT INTO #users (giveaway_id, user_id) VALUES (@GiveawayId, @UserId)";
 
             QueryParametersBuilder parameters = new QueryParametersBuilder();
-            parameters.Add("@GiveawayId", giveawayId);
+            parameters.Add("@GiveawayId", messageId);
             parameters.Add("@UserId", userId);
 
-            var list = await Database.SelectQueryAsync(selectQuery, parameters, Config);
+            List<string> list = await Database.SelectQueryAsync(selectQuery, parameters, Config);
             if (list.Any())
             {
                 return GiveawayStatus.UserExist;
             }
-            else
+            int result = await Database.InsertQueryAsync(insertQuery, parameters, Config);
+            if (result > 0)
             {
-                var result = await Database.InsertQueryAsync(insertQuery, parameters, Config);
-                if (result > 0)
-                    return GiveawayStatus.UserAdded;
-                return GiveawayStatus.UserAddFail;
+                const string selectQuery2 = "SELECT entries FROM #list where message_id = @GiveawayId";
+
+                List<string> items = await Database.SelectQueryAsync(selectQuery2, parameters, Config);
+                int entries = 0;
+                entries = Convert.ToInt32(items[0]);
+                entries = entries + 1;
+                const string updateQuery = "UPDATE #list SET entries = @Entries WHERE message_id = @GiveawayId";
+                parameters.Add("@Entries", entries.ToString());
+                await Database.UpdateQueryAsync(updateQuery, parameters, Config);
+                return GiveawayStatus.UserAdded;
             }
+            return GiveawayStatus.UserAddFail;
         }
         public async Task<GiveawayStatus> RemoveUserAsync(string giveawayId, string userId)
         {
-            var status = await GiveawayClosed(giveawayId);
-            if (status == GiveawayStatus.Closed) return GiveawayStatus.Closed;
+            GiveawayStatus status = await GiveawayClosed(giveawayId);
+            if (status == GiveawayStatus.Closed)
+            {
+                return GiveawayStatus.Closed;
+            }
 
             const string selectQuery = "DELETE FROM #users WHERE giveaway_id = @GiveawayId AND user_id = @UserId";
 
@@ -473,10 +479,26 @@ namespace Giveaway
             parameters.Add("@GiveawayId", giveawayId);
             parameters.Add("@UserId", userId);
 
-            var result = await Database.DeleteQueryAsync(selectQuery, parameters, Config);
-            if (result > 0)
-                return GiveawayStatus.UserRemoved;
-            return GiveawayStatus.UserRemoveFail;
+            int result = await Database.DeleteQueryAsync(selectQuery, parameters, Config);
+            if (result == 0)
+            {
+                return GiveawayStatus.UserRemoveFail;
+            }
+            const string selectQuery2 = "SELECT entries FROM #list where message_id = @GiveawayId";
+
+            List<string> items = await Database.SelectQueryAsync(selectQuery2, parameters, Config);
+            int entries = Convert.ToInt32(items[0]);
+            entries = entries - 1;
+            if (entries < 0)
+            {
+                entries = 0;
+            }
+
+            const string updateQuery = "UPDATE #list SET entries = @Entries WHERE message_id = @GiveawayId";
+            parameters.Add("@Entries", entries.ToString());
+            await Database.UpdateQueryAsync(updateQuery, parameters, Config);
+            return GiveawayStatus.UserRemoved;
+
         }
         public async Task UpdateList()
         {
@@ -498,92 +520,152 @@ namespace Giveaway
             return activeGiveaways;
         }
 
+        private async Task<bool> TryAddGiveawayUser(SocketMessageComponent component)
+        {
+            GiveawayStatus status = await AddUserAsync(component.Message.Id.ToString(), component.User.Id.ToString());
+            switch(status)
+            {
+                case GiveawayStatus.UserAdded:
+                    await UpdateGiveawayEmbed(component.Message.Id,component.Channel as ITextChannel,true);
+                    await component.RespondAsync("You successfully joined giveaway!", ephemeral: true);
+                    return true;
+                case GiveawayStatus.Closed:
+                    await component.RespondAsync("You can't join giveaway that is closed!", ephemeral: true);
+                    return false;
+                case GiveawayStatus.UserAddFail:
+                    await component.RespondAsync("We can not add you to this giveaway, contact server owner!", ephemeral: true);
+                    return false;
+                case GiveawayStatus.UserExist:
+                    var button = new ComponentBuilder().WithButton("Leave", "RemoveGiveawayUser", ButtonStyle.Danger);
+                    await component.RespondAsync("You already joined this giveaway!", components: button.Build(), ephemeral: true);
+                    return false;
+                default:
+                    return false;
+            }
+        }
+        private async Task<bool> TryRemoveGiveawayUser(SocketMessageComponent component)
+        {
+            GiveawayStatus status = await RemoveUserAsync(component.Message.Reference.MessageId.ToString(),component.User.Id.ToString());
+            switch(status)
+            {
+                case GiveawayStatus.UserRemoved:
+                    await UpdateGiveawayEmbed(component.Message.Id, component.Channel as ITextChannel,true);
+                    await component.RespondAsync("You left the giveaway!", ephemeral: true);
+                    return true;
+                case GiveawayStatus.Closed:
+                    await component.RespondAsync("You can't leave giveaway that is closed!", ephemeral: true);
+                    return false;
+                case GiveawayStatus.UserRemoveFail:
+                    await component.RespondAsync("You did not sign up for this giveaway!", ephemeral: true);
+                    return false;
+                default:
+                    return false;
+            }
+        }
         public async Task<Task> HandleComponent(SocketMessageComponent component)
         {
-            Console.WriteLine("Component executed in giveaway");
-            await UpdateList();
             try
             {
-                var activeGiveaways = GetActiveGiveaways();
-                foreach (var data in activeGiveaways)
-                { 
-                    if (data == component.Data.CustomId)
-                    {
-                        var result = await AddUserAsync(data.ToString(), component.User.Id.ToString());
-                        if (result == GiveawayStatus.UserAdded)
-                        {
-                            var embed = component.Message.Embeds.First().ToEmbedBuilder();
-                            var newEmbed = await EditGiveawayEmbed(embed, component.Data.CustomId, options: new EmbedOptions[] { EmbedOptions.increase });
+                if (component == null)
+                {
+                    return Task.CompletedTask;
+                }
 
-                            await component.Message.ModifyAsync(x =>
-                            {
-                                x.Embed = newEmbed.Build();
-                            });
+                if (component.Data.CustomId == "AddGiveawayUser")
+                {
+                    await TryAddGiveawayUser(component);
+                }
 
-                            await component.RespondAsync("You successfully joined giveaway!", ephemeral: true);
-                        }
-                        else if (result == GiveawayStatus.UserExist)
-                        {
-                            var button = new ComponentBuilder().WithButton("Leave", component.Data.CustomId + "_remove", ButtonStyle.Danger);
-                            await component.RespondAsync("You already joined this giveaway!", components: button.Build(), ephemeral: true);
-                        }
-                        else if (result == GiveawayStatus.Closed)
-                        {
-                            await component.RespondAsync("You can't join giveaway that is closed!", ephemeral: true);
-                        }
-                        else if (result == GiveawayStatus.UserAddFail)
-                        {
-                            await component.RespondAsync("We can not add you to this giveaway, contact server owner!", ephemeral: true);
-                        }
-                        break;
-                    }
-                    else if (component.Data.CustomId.ToString().Contains("_remove") && component.Data.CustomId.Contains(data))
-                    {
-                        string customId = component.Data.CustomId[..component.Data.CustomId.IndexOf("_remove")];
-                        var result = await RemoveUserAsync(customId, component.User.Id.ToString());
-
-                        const string selectQuery = "SELECT message_id FROM #list where id = @CustomId";
-
-                        QueryParametersBuilder parameters = new QueryParametersBuilder();
-                        parameters.Add("@CustomId", customId);
-
-                        var messageId = await Database.SelectQueryAsync(selectQuery, parameters, Config);
-
-                        IMessage message = await component.Channel.GetMessageAsync(ulong.Parse(messageId.First()));
-
-                        if (message == null)
-                        {
-                            await component.RespondAsync("This giveaway does not exists!", ephemeral: true);
-                            break;
-                        }
-
-                        if (result == GiveawayStatus.UserRemoved)
-                        {
-                            var embed = message.Embeds.First().ToEmbedBuilder(); //get old embed to edit
-                            var newEmbed = await EditGiveawayEmbed(embed, customId, options: new EmbedOptions[] { EmbedOptions.decrease });
-
-                            await component.Channel.ModifyMessageAsync(ulong.Parse(messageId.First()), m =>
-                            {
-                                m.Embed = newEmbed.Build();
-                            });
-
-                            await component.RespondAsync("You left the giveaway!", ephemeral: true);
-                        }
-                        else if (result == GiveawayStatus.UserRemoveFail)
-                        {
-                            await component.RespondAsync("You did not sign up for this giveaway!", ephemeral: true);
-                        }
-                        else if (result == GiveawayStatus.Closed)
-                        {
-                            await component.RespondAsync("You can't leave giveaway that is closed!", ephemeral: true);
-                        }
-                        break;
-                    }
+                if (component.Data.CustomId == "RemoveGiveawayUser")
+                {
+                    await TryRemoveGiveawayUser(component);
                 }
             }catch(Exception ex)
             {
-                Console.WriteLine("Giveaway plugin error in component handler: " + ex.Message);
+                Logger.Log(Name, $"{component.Data.CustomId} component error: {ex}",LogLevel.Error);
             }
+            //try
+            //{
+            //    var activeGiveaways = GetActiveGiveaways();
+            //    foreach (var data in activeGiveaways)
+            //    { 
+            //        if (data == component.Data.CustomId)
+            //        {
+            //            var result = await AddUserAsync(data.ToString(), component.User.Id.ToString());
+            //            if (result == GiveawayStatus.UserAdded)
+            //            {
+            //                var embed = component.Message.Embeds.First().ToEmbedBuilder();
+            //                var newEmbed = await EditGiveawayEmbed(embed, component.Data.CustomId, options: new EmbedOptions[] { EmbedOptions.increase });
+
+            //                await component.Message.ModifyAsync(x =>
+            //                {
+            //                    x.Embed = newEmbed.Build();
+            //                });
+
+            //                await component.RespondAsync("You successfully joined giveaway!", ephemeral: true);
+            //            }
+            //            else if (result == GiveawayStatus.UserExist)
+            //            {
+            //                var button = new ComponentBuilder().WithButton("Leave", "RemoveGiveawayUser", ButtonStyle.Danger);
+            //                await component.RespondAsync("You already joined this giveaway!", components: button.Build(), ephemeral: true);
+            //            }
+            //            else if (result == GiveawayStatus.Closed)
+            //            {
+            //                await component.RespondAsync("You can't join giveaway that is closed!", ephemeral: true);
+            //            }
+            //            else if (result == GiveawayStatus.UserAddFail)
+            //            {
+            //                await component.RespondAsync("We can not add you to this giveaway, contact server owner!", ephemeral: true);
+            //            }
+            //            break;
+            //        }
+            //        else if (component.Data.CustomId.ToString().Contains("_remove") && component.Data.CustomId.Contains(data))
+            //        {
+            //            string customId = component.Data.CustomId[..component.Data.CustomId.IndexOf("_remove")];
+            //            var result = await RemoveUserAsync(customId, component.User.Id.ToString());
+
+            //            const string selectQuery = "SELECT message_id FROM #list where id = @CustomId";
+
+            //            QueryParametersBuilder parameters = new QueryParametersBuilder();
+            //            parameters.Add("@CustomId", customId);
+
+            //            var messageId = await Database.SelectQueryAsync(selectQuery, parameters, Config);
+
+            //            IMessage message = await component.Channel.GetMessageAsync(ulong.Parse(messageId.First()));
+
+            //            if (message == null)
+            //            {
+            //                await component.RespondAsync("This giveaway does not exists!", ephemeral: true);
+            //                break;
+            //            }
+
+            //            if (result == GiveawayStatus.UserRemoved)
+            //            {
+            //                var embed = message.Embeds.First().ToEmbedBuilder(); //get old embed to edit
+            //                var newEmbed = await EditGiveawayEmbed(embed, customId, options: new EmbedOptions[] { EmbedOptions.decrease });
+
+            //                await component.Channel.ModifyMessageAsync(ulong.Parse(messageId.First()), m =>
+            //                {
+            //                    m.Embed = newEmbed.Build();
+            //                });
+
+            //                await component.RespondAsync("You left the giveaway!", ephemeral: true);
+            //            }
+            //            else if (result == GiveawayStatus.UserRemoveFail)
+            //            {
+            //                await component.RespondAsync("You did not sign up for this giveaway!", ephemeral: true);
+            //            }
+            //            else if (result == GiveawayStatus.Closed)
+            //            {
+            //                await component.RespondAsync("You can't leave giveaway that is closed!", ephemeral: true);
+            //            }
+            //            break;
+            //        }
+            //    }
+            //}catch(Exception ex)
+            //{
+            //    Console.WriteLine("Giveaway plugin error in component handler: " + ex.Message);
+            //}
             return Task.CompletedTask;
         }
         /// <summary>
@@ -615,12 +697,6 @@ namespace Giveaway
                 if (closed == "0")
                 {
                     var channel = guild.GetTextChannel(channelId);
-                    var messageData = await channel.GetMessageAsync(messageId);
-
-                    var embed = messageData.Embeds.First().ToEmbedBuilder();
-                    var newEmbed = await EditGiveawayEmbed(embed, options: new EmbedOptions[] { EmbedOptions.CloseGiveaway });
-
-                    if (newEmbed == null) newEmbed = embed;
                     
                     Func<Task> func = async () =>
                     {
@@ -628,8 +704,11 @@ namespace Giveaway
 
                         parameters.Add("@MessageId", messageId.ToString());
                         parameters.Add("@Closed", "1");
-                        await channel.ModifyMessageAsync(messageId, x => x.Embed = newEmbed.Build());
+
                         await Database.UpdateQueryAsync(updateQuery, parameters, Config);
+
+                        await UpdateGiveawayEmbed(messageId, channel, false);
+                        
                         Logger.Log(Config.pluginName, "Closed giveaway!", LogLevel.Info);
                     };
                     return func;
